@@ -1,1 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Car Deal Radar (Manual)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h1 { margin: 0 0 6px; }
+    .muted { color: #666; margin: 0 0 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; }
+    label { display:block; font-size: 12px; color:#444; margin-top:10px; }
+    input, textarea, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+    button { padding: 10px 12px; margin-top: 12px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; font-size: 14px; }
+    th { position: sticky; top: 0; background: #fff; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #ddd; }
+    .good { border-color:#2ecc71; }
+    .great { border-color:#27ae60; font-weight:700; }
+    .high { border-color:#e67e22; }
+    .lowconf { border-color:#999; }
+    .row { display:flex; gap:10px; }
+    .row > * { flex:1; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Car Deal Radar</h1>
+  <p class="muted">Manual add / CSV paste → compares price vs same year + make + model (median).</p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Add a listing</h3>
+
+      <div class="row">
+        <div>
+          <label>Year</label>
+          <input id="year" type="number" placeholder="2015" />
+        </div>
+        <div>
+          <label>Make</label>
+          <input id="make" placeholder="Toyota" />
+        </div>
+      </div>
+
+      <label>Model</label>
+      <input id="model" placeholder="Aqua" />
+
+      <div class="row">
+        <div>
+          <label>Price (NZD)</label>
+          <input id="price" type="number" placeholder="8500" />
+        </div>
+        <div>
+          <label>Listed time (you type)</label>
+          <input id="listedAt" placeholder="2026-01-06 18:40" />
+        </div>
+      </div>
+
+      <label>Title (optional)</label>
+      <input id="title" placeholder="2015 Toyota Aqua - low kms" />
+
+      <label>Listing URL (optional)</label>
+      <input id="url" placeholder="https://www.facebook.com/marketplace/item/..." />
+
+      <button id="addBtn">Add listing</button>
+      <button id="clearBtn">Clear all (local)</button>
+
+      <hr />
+
+      <h3>Paste CSV (optional)</h3>
+      <p class="muted">Columns: year,make,model,price,listedAt,title,url</p>
+      <textarea id="csv" rows="8" class="mono" placeholder="2015,Toyota,Aqua,8500,2026-01-06 18:40,Low kms,https://..."></textarea>
+      <button id="importBtn">Import CSV</button>
+    </div>
+
+    <div class="card">
+      <h3>Filters</h3>
+
+      <label>Search (make/model/title)</label>
+      <input id="search" placeholder="aqua" />
+
+      <div class="row">
+        <div>
+          <label>Min deal % below median</label>
+          <input id="minDeal" type="number" value="8" />
+        </div>
+        <div>
+          <label>Max age (days) (optional)</label>
+          <input id="maxDays" type="number" placeholder="30" />
+        </div>
+      </div>
+
+      <label>Sort</label>
+      <select id="sort">
+        <option value="newest">Newest (listedAt)</option>
+        <option value="best">Best deal (% below median)</option>
+        <option value="priceLow">Price (low to high)</option>
+      </select>
+
+      <button id="refreshBtn">Refresh table</button>
+
+      <div id="stats" class="muted" style="margin-top:10px;"></div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Year</th><th>Make</th><th>Model</th>
+            <th>Price</th><th>Median</th><th>% vs Median</th>
+            <th>Listed</th><th>Comps</th><th>Link</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+  const KEY = "dealRadarListings_v1";
+
+  function load() {
+    try { return JSON.parse(localStorage.getItem(KEY)) || []; }
+    catch { return []; }
+  }
+  function save(list) {
+    localStorage.setItem(KEY, JSON.stringify(list));
+  }
+
+  function normalizeText(s){ return (s||"").toString().trim(); }
+  function keyOf(x){
+    return `${x.year}|${x.make.toLowerCase()}|${x.model.toLowerCase()}`;
+  }
+
+  function parseListedAt(s){
+    // Accepts "YYYY-MM-DD HH:MM" or ISO; fallback to Date.now()
+    const t = Date.parse(s.replace(" ", "T"));
+    return Number.isFinite(t) ? t : Date.now();
+  }
+
+  function median(arr){
+    const a = [...arr].sort((x,y)=>x-y);
+    if (!a.length) return null;
+    const mid = Math.floor(a.length/2);
+    return a.length % 2 ? a[mid] : (a[mid-1]+a[mid])/2;
+  }
+
+  function dealBadge(pct, comps){
+    // pct = (median - price)/median * 100
+    const lowConf = comps < 6;
+    if (lowConf) return `<span class="pill lowconf">Low conf</span>`;
+    if (pct >= 15) return `<span class="pill great">🔥 Great</span>`;
+    if (pct >= 8) return `<span class="pill good">✅ Good</span>`;
+    if (pct <= -8) return `<span class="pill high">⚠️ High</span>`;
+    return `<span class="pill">Normal</span>`;
+  }
+
+  function compute(listings){
+    // group comps by same year/make/model
+    const groups = new Map();
+    for (const x of listings){
+      const k = keyOf(x);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(x);
+    }
+
+    // attach median + pct
+    const out = listings.map(x => {
+      const comps = groups.get(keyOf(x)) || [];
+      const prices = comps.map(c => c.price).filter(n => Number.isFinite(n));
+      const med = median(prices);
+      const pct = (med && med > 0) ? ((med - x.price) / med) * 100 : null;
+      return { ...x, compsCount: prices.length, medianPrice: med, pctBelowMedian: pct };
+    });
+
+    return out;
+  }
+
+  function render(){
+    const search = normalizeText(document.getElementById("search").value).toLowerCase();
+    const minDeal = Number(document.getElementById("minDeal").value || 0);
+    const maxDays = Number(document.getElementById("maxDays").value || 0);
+    const sort = document.getElementById("sort").value;
+
+    const raw = load();
+    const enriched = compute(raw);
+
+    const now = Date.now();
+    let rows = enriched.filter(x => {
+      const text = `${x.make} ${x.model} ${x.title}`.toLowerCase();
+      if (search && !text.includes(search)) return false;
+      if (Number.isFinite(x.pctBelowMedian) && x.pctBelowMedian < minDeal) return false;
+      if (maxDays > 0){
+        const ageDays = (now - x.listedAtMs) / (1000*60*60*24);
+        if (ageDays > maxDays) return false;
+      }
+      return true;
+    });
+
+    if (sort === "newest"){
+      rows.sort((a,b)=>b.listedAtMs - a.listedAtMs);
+    } else if (sort === "best"){
+      rows.sort((a,b)=>(b.pctBelowMedian ?? -999) - (a.pctBelowMedian ?? -999));
+    } else if (sort === "priceLow"){
+      rows.sort((a,b)=>a.price - b.price);
+    }
+
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = "";
+
+    for (const x of rows){
+      const pctText = Number.isFinite(x.pctBelowMedian) ? `${x.pctBelowMedian.toFixed(1)}%` : "—";
+      const medText = Number.isFinite(x.medianPrice) ? Math.round(x.medianPrice).toLocaleString() : "—";
+      const priceText = Number.isFinite(x.price) ? Math.round(x.price).toLocaleString() : "—";
+      const badge = Number.isFinite(x.pctBelowMedian) ? dealBadge(x.pctBelowMedian, x.compsCount) : `<span class="pill">No comps</span>`;
+      const link = x.url ? `<a href="${x.url}" target="_blank" rel="noopener">Open</a>` : "—";
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${x.year}</td>
+        <td>${x.make}</td>
+        <td>${x.model}</td>
+        <td>$${priceText}</td>
+        <td>$${medText}</td>
+        <td>${pctText} ${badge}</td>
+        <td>${x.listedAtRaw}</td>
+        <td>${x.compsCount}</td>
+        <td>${link}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    document.getElementById("stats").textContent =
+      `Stored listings: ${raw.length} • Showing: ${rows.length} • Deal filter: ≥ ${minDeal}% below median`;
+  }
+
+  document.getElementById("addBtn").addEventListener("click", () => {
+    const year = Number(document.getElementById("year").value);
+    const make = normalizeText(document.getElementById("make").value);
+    const model = normalizeText(document.getElementById("model").value);
+    const price = Number(document.getElementById("price").value);
+    const listedAtRaw = normalizeText(document.getElementById("listedAt").value) || new Date().toISOString().slice(0,16).replace("T"," ");
+    const title = normalizeText(document.getElementById("title").value);
+    const url = normalizeText(document.getElementById("url").value);
+
+    if (!year || !make || !model || !Number.isFinite(price)){
+      alert("Please fill Year, Make, Model, and Price.");
+      return;
+    }
+
+    const item = {
+      id: crypto.randomUUID(),
+      year, make, model, price,
+      title, url,
+      listedAtRaw,
+      listedAtMs: parseListedAt(listedAtRaw),
+      addedAtMs: Date.now()
+    };
+
+    const list = load();
+    list.push(item);
+    save(list);
+    render();
+  });
+
+  document.getElementById("importBtn").addEventListener("click", () => {
+    const text = document.getElementById("csv").value.trim();
+    if (!text) return;
+
+    const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
+    const list = load();
+
+    for (const line of lines){
+      // year,make,model,price,listedAt,title,url
+      const parts = line.split(",").map(p=>p.trim());
+      if (parts.length < 5) continue;
+
+      const year = Number(parts[0]);
+      const make = parts[1] || "";
+      const model = parts[2] || "";
+      const price = Number(parts[3]);
+      const listedAtRaw = parts[4] || "";
+      const title = parts[5] || "";
+      const url = parts[6] || "";
+
+      if (!year || !make || !model || !Number.isFinite(price)) continue;
+
+      list.push({
+        id: crypto.randomUUID(),
+        year, make, model, price,
+        title, url,
+        listedAtRaw,
+        listedAtMs: parseListedAt(listedAtRaw),
+        addedAtMs: Date.now()
+      });
+    }
+
+    save(list);
+    render();
+  });
+
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    if (confirm("Delete all saved listings from this browser?")){
+      localStorage.removeItem(KEY);
+      render();
+    }
+  });
+
+  document.getElementById("refreshBtn").addEventListener("click", render);
+
+  render();
+</script>
+</body>
+</html>
 
